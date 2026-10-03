@@ -1,0 +1,22 @@
+[package]
+name = "llvm-amdgpu-types"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0 WITH LLVM-exception"
+description = "Typed AMDGPU instruction families generated from LLVM TableGen"
+repository = "https://github.com/takashiidobe/llvm-amdgpu-types"
+readme = "README.md"
+keywords = ["amdgpu", "llvm", "assembly", "gpu"]
+categories = ["development-tools", "parser-implementations"]
+include = [
+  "src/**",
+  "examples/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "README.md",
+  "LICENSE.txt",
+]
+
+[lib]
+path = "src/lib.rs"
