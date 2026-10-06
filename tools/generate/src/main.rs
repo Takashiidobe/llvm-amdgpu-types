@@ -2,110 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::error::Error;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::process::Command;
 
 use proc_macro2::{Ident, Span};
 use quote::quote;
-use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
-use serde_json::Value;
-
-struct Records(BTreeMap<String, Value>);
-
-impl<'de> Deserialize<'de> for Records {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct RecordVisitor;
-        impl<'de> Visitor<'de> for RecordVisitor {
-            type Value = Records;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("TableGen record map")
-            }
-            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Records, M::Error> {
-                let mut records = BTreeMap::new();
-                while let Some((name, mut record)) = map.next_entry::<String, Value>()? {
-                    if (record["isPseudo"] == 0
-                        && record["AsmString"].as_str().is_some_and(|s| !s.is_empty()))
-                        || record.get("Pfl").is_some()
-                        || record.get("DstVT").is_some()
-                        || record.get("RegClass").is_some()
-                    {
-                        if let Some(fields) = record.as_object_mut() {
-                            fields.retain(|key, _| {
-                                matches!(
-                                    key.as_str(),
-                                    "AsmString"
-                                        | "InOperandList"
-                                        | "OutOperandList"
-                                        | "Predicates"
-                                        | "Uses"
-                                        | "Defs"
-                                        | "PseudoInstr"
-                                        | "Pfl"
-                                        | "DstVT"
-                                        | "Src0VT"
-                                        | "Src1VT"
-                                        | "Src2VT"
-                                        | "RegClass"
-                                )
-                            });
-                        }
-                        records.insert(name, record);
-                    }
-                }
-                Ok(Records(records))
-            }
-        }
-        deserializer.deserialize_map(RecordVisitor)
-    }
-}
+use roxmltree::Node;
 
 fn ident(name: &str) -> Ident {
     Ident::new(name, Span::call_site())
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
-    let mut args = env::args_os().skip(1);
-    let llvm = PathBuf::from(
-        args.next()
-            .ok_or("usage: generate-amdgpu-types LLVM_CHECKOUT [TABLEGEN_JSON]")?,
-    );
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let supplied_json = args.next().map(PathBuf::from);
-    let json = supplied_json
-        .clone()
-        .unwrap_or_else(|| root.join("target/amdgpu-records.json"));
-    fs::create_dir_all(root.join("target"))?;
-    if supplied_json.is_none() {
-        let tblgen = env::var_os("LLVM_TBLGEN").unwrap_or_else(|| "llvm-tblgen".into());
-        let target = llvm.join("llvm/lib/Target/AMDGPU");
-        let status = Command::new(tblgen)
-            .arg("-dump-json")
-            .arg("-I")
-            .arg(llvm.join("llvm/include"))
-            .arg("-I")
-            .arg(&target)
-            .arg(target.join("AMDGPU.td"))
-            .arg("-o")
-            .arg(&json)
-            .status()?;
-        if !status.success() {
-            return Err("llvm-tblgen failed".into());
-        }
-    }
-    eprintln!("reading TableGen records");
-    let Records(records) = serde_json::from_reader(BufReader::new(File::open(&json)?))?;
-    let revision = Command::new("git")
-        .arg("-C")
-        .arg(&llvm)
-        .args(["rev-parse", "HEAD"])
-        .output()?;
-    if !revision.status.success() {
-        return Err("could not read LLVM revision".into());
-    }
-    let revision = String::from_utf8(revision.stdout)?.trim().to_owned();
-    generate(&root, &records, &revision)?;
-    Ok(())
 }
 
 fn rust_name(name: &str) -> String {
@@ -134,50 +39,73 @@ fn value_type(name: &str) -> Option<&'static str> {
         "b16" => "B16",
         "b32" => "B32",
         "b64" => "B64",
-        "b128" => "B128",
-        "b256" => "B256",
-        "b512" => "B512",
-        "b1024" => "B1024",
         _ => return None,
     })
 }
 
-fn source_type(
-    records: &BTreeMap<String, Value>,
-    class: &str,
-    data: &Ident,
-    modified: bool,
-) -> Option<proc_macro2::TokenStream> {
-    let reg_class = records
-        .get(class)
-        .and_then(|r| r["RegClass"]["def"].as_str())
-        .unwrap_or(class);
-    if class.starts_with("VSrc_") {
-        Some(if modified {
-            quote! { crate::ModifiedSource<crate::#data> }
-        } else {
-            quote! { crate::SourceOperand<crate::#data> }
-        })
-    } else if class.starts_with("SSrc_") {
-        Some(quote! { crate::ScalarSourceOperand<crate::#data> })
-    } else if reg_class.starts_with("VGPR_") || reg_class.starts_with("VReg_") {
-        Some(quote! { crate::VectorRegister<crate::#data> })
-    } else if reg_class.starts_with("SReg_") || reg_class.starts_with("SGPR_") {
-        Some(quote! { crate::ScalarRegister<crate::#data> })
-    } else {
-        None
-    }
+fn child<'a>(node: Node<'a, 'a>, name: &str) -> Option<Node<'a, 'a>> {
+    node.children().find(|n| n.has_tag_name(name))
 }
 
-fn generate(
-    root: &std::path::Path,
-    records: &BTreeMap<String, Value>,
-    revision: &str,
-) -> Result<(), Box<dyn Error>> {
+fn text<'a>(node: Node<'a, 'a>, name: &str) -> &'a str {
+    child(node, name).and_then(|n| n.text()).unwrap_or("")
+}
+
+fn operand_type(operand: Node<'_, '_>, bit_type: Option<&str>) -> Option<Ident> {
+    let raw = text(operand, "DataFormatName")
+        .strip_prefix("FMT_NUM_")?
+        .to_lowercase();
+    let ty = value_type(&raw)?;
+    let ty = bit_type
+        .filter(|b| b.starts_with('B') && b[1..] == ty[1..])
+        .unwrap_or(ty);
+    Some(ident(ty))
+}
+
+fn source_type(operand: Node<'_, '_>, ty: &Ident, e64: bool) -> Option<proc_macro2::TokenStream> {
+    Some(match text(operand, "OperandType") {
+        "OPR_SRC" | "OPR_SRC_NOLDS" if e64 => quote! { crate::ModifiedSource<crate::#ty> },
+        "OPR_SRC" | "OPR_SRC_NOLDS" => quote! { crate::SourceOperand<crate::#ty> },
+        "OPR_VGPR" => quote! { crate::VectorRegister<crate::#ty> },
+        "OPR_SREG" => quote! { crate::ScalarRegister<crate::#ty> },
+        _ => return None,
+    })
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut args = env::args_os().skip(1);
+    let xml = args
+        .next()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("amd-isa/amdgpu_isa_rdna2.xml"));
+    if args.next().is_some() {
+        return Err("usage: generate-amdgpu-types [RDNA2_XML]".into());
+    }
+    let source = fs::read_to_string(xml)?;
+    generate(&root, &source)
+}
+
+fn generate(root: &std::path::Path, source: &str) -> Result<(), Box<dyn Error>> {
+    let document = roxmltree::Document::parse(source)?;
+    let spec = document.root_element();
+    let metadata = child(spec, "Document").ok_or("missing Document")?;
+    let isa = child(spec, "ISA").ok_or("missing ISA")?;
+    let architecture = child(isa, "Architecture").ok_or("missing Architecture")?;
+    if text(architecture, "ArchitectureName") != "AMD RDNA 2" {
+        return Err("only AMD RDNA 2 specifications are supported".into());
+    }
+    let release = text(metadata, "ReleaseDate");
+    let schema = text(metadata, "SchemaVersion");
+    if schema != "1.1.1" {
+        return Err(format!("unsupported XML schema: {schema}").into());
+    }
     let mut comparisons = BTreeSet::new();
     let mut predicates = BTreeSet::new();
     let mut forms = BTreeMap::<String, proc_macro2::TokenStream>::new();
     let mut families = BTreeMap::<String, (usize, bool)>::new();
+    let mut family_docs = BTreeMap::<String, BTreeMap<String, String>>::new();
+    let mut descriptions = BTreeMap::<String, String>::new();
     let mut inventory = BTreeSet::new();
     let mut decoders = BTreeMap::<
         String,
@@ -188,38 +116,24 @@ fn generate(
             bool,
         ),
     >::new();
-    let profiles: BTreeMap<_, _> = records
-        .values()
-        .filter_map(|record| {
-            Some((
-                record["PseudoInstr"].as_str()?,
-                record["Pfl"]["def"].as_str()?,
-            ))
-        })
-        .collect();
-    for (name, record) in records {
-        let Some(assembly) = record["AsmString"].as_str() else {
-            continue;
-        };
-        inventory.insert(
-            assembly
-                .split(|c: char| c.is_whitespace() || c == '$')
-                .next()
-                .unwrap_or("")
-                .to_owned(),
-        );
-        if !name.ends_with("_gfx10") {
+    let instructions = child(isa, "Instructions").ok_or("missing Instructions")?;
+    for instruction in instructions
+        .children()
+        .filter(|n| n.has_tag_name("Instruction"))
+    {
+        let operation = text(instruction, "InstructionName").to_lowercase();
+        if operation.is_empty() {
+            return Err("instruction has no name".into());
+        }
+        inventory.insert(operation.clone());
+        let description = text(instruction, "Description")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let parts: Vec<_> = operation.split('_').collect();
+        if parts.first() != Some(&"v") {
             continue;
         }
-        let mnemonic = record["PseudoInstr"].as_str().unwrap_or("");
-        let (operation, encoding) = if let Some(base) = mnemonic.strip_suffix("_e32") {
-            (base, ident("E32"))
-        } else if let Some(base) = mnemonic.strip_suffix("_e64") {
-            (base, ident("E64"))
-        } else {
-            continue;
-        };
-        let parts: Vec<_> = operation.split('_').collect();
         let mut split = parts.len();
         while split > 0 && value_type(parts[split - 1]).is_some() {
             split -= 1;
@@ -227,210 +141,225 @@ fn generate(
         if split == parts.len() {
             continue;
         }
-        let types: Vec<_> = parts[split..]
-            .iter()
-            .filter_map(|ty| value_type(ty))
-            .collect();
-        let profile_name = record["Pfl"]["def"]
-            .as_str()
-            .or_else(|| profiles.get(mnemonic).copied());
-        let Some(profile) = profile_name.and_then(|p| records.get(p)) else {
+        let bit_type = parts
+            .last()
+            .and_then(|p| value_type(p))
+            .filter(|t| t.starts_with('B'));
+        let Some(encodings) = child(instruction, "InstructionEncodings") else {
             continue;
         };
-        if parts.starts_with(&["v", "cmp"]) && parts.len() == 4 {
-            let predicate = match parts[2] {
-                "f" => "Never",
-                "t" => "Always",
-                "eq" => "Eq",
-                "ne" => "Ne",
-                "lt" => "Lt",
-                "le" => "Le",
-                "gt" => "Gt",
-                "ge" => "Ge",
-                "lg" => "Lg",
-                "o" => "Ordered",
-                "u" => "Unordered",
-                "nlt" => "NotLt",
-                "nle" => "NotLe",
-                "ngt" => "NotGt",
-                "nge" => "NotGe",
-                "nlg" => "NotLg",
+        for form in encodings
+            .children()
+            .filter(|n| n.has_tag_name("InstructionEncoding"))
+        {
+            if text(form, "EncodingCondition") != "default" {
+                continue;
+            }
+            let (encoding_name, e64) = match text(form, "EncodingName") {
+                "ENC_VOP1" | "ENC_VOP2" | "ENC_VOPC" => ("E32", false),
+                "ENC_VOP3" => ("E64", true),
                 _ => continue,
             };
-            let ty = types[0];
-            predicates.insert(predicate.to_owned());
-            comparisons.insert((predicate.to_owned(), ty.to_owned(), encoding.to_string()));
-            let variant = rust_name(mnemonic);
-            let (p, t) = (ident(predicate), ident(ty));
-            let instruction = quote! { crate::VCmp<predicate::#p, crate::#t, crate::#encoding> };
-            let expression = quote! {
-                <#instruction>::new(crate::decode::operand(&fields[0])?, crate::decode::operand(&fields[1])?, crate::decode::operand(&fields[2])?)
+            let encoding = ident(encoding_name);
+            let mnemonic = format!("{operation}_{}", encoding_name.to_lowercase());
+            let Some(operands) = child(form, "Operands") else {
+                continue;
             };
-            decoders.insert(
-                variant,
-                (
-                    mnemonic.to_owned(),
-                    instruction,
-                    quote! { let fields = crate::decode::fields(text, 3)?; #expression },
-                    encoding == "E32",
-                ),
-            );
-            continue;
-        }
-        if !parts.starts_with(&["v"]) {
-            continue;
-        }
-        let Some(outputs) = record["OutOperandList"]["args"].as_array() else {
-            continue;
-        };
-        if outputs.len() != 1 {
-            continue;
-        }
-        let output_class = outputs[0][0]["def"].as_str().unwrap_or("");
-        let Some(inputs) = record["InOperandList"]["args"].as_array() else {
-            continue;
-        };
-        let sources: Vec<_> = inputs
-            .iter()
-            .filter(|input| matches!(input[1].as_str(), Some("src0" | "src1" | "src2")))
-            .collect();
-        if sources.is_empty() || sources.len() > 3 {
-            continue;
-        }
-        if inputs.iter().any(|input| {
-            !matches!(
-                input[1].as_str(),
-                Some(
-                    "src0"
-                        | "src1"
-                        | "src2"
-                        | "src0_modifiers"
-                        | "src1_modifiers"
-                        | "src2_modifiers"
-                        | "clamp"
-                        | "omod"
-                )
-            )
-        }) {
-            continue;
-        }
-        let mut data_types = Vec::new();
-        for field in std::iter::once("DstVT").chain(
-            ["Src0VT", "Src1VT", "Src2VT"]
-                .into_iter()
-                .take(sources.len()),
-        ) {
-            let Some(raw) = profile[field]["def"].as_str() else {
-                break;
-            };
-            let typed = if raw.starts_with('i') {
-                types
-                    .iter()
-                    .find(|ty| ty[1..] == raw[1..] && !ty.starts_with('F'))
-                    .copied()
-                    .or_else(|| value_type(raw))
-            } else {
-                value_type(raw)
-            };
-            let positional = types
-                .get(data_types.len())
-                .copied()
-                .filter(|ty| types.len() == sources.len() + 1 && ty[1..] == raw[1..]);
-            let typed = positional.or(typed);
-            let Some(typed) = typed else { break };
-            data_types.push(ident(typed));
-        }
-        if data_types.len() != sources.len() + 1 {
-            continue;
-        }
-        if !source_type(records, output_class, &data_types[0], false)
-            .is_some_and(|ty| ty.to_string().contains("VectorRegister"))
-        {
-            continue;
-        }
-        let family_name = rust_name(&parts[..split].join("_"));
-        let family = ident(&family_name);
-        let arity = sources.len();
-        let homogeneous = data_types.iter().all(|ty| *ty == data_types[0]);
-        let entry = families
-            .entry(family_name.clone())
-            .or_insert((arity, homogeneous));
-        if entry.0 != arity {
-            continue;
-        }
-        entry.1 &= homogeneous;
-        let mut operand_types = Vec::new();
-        for (index, source) in sources.iter().enumerate() {
-            let Some(class) = source[0]["def"].as_str() else {
-                break;
-            };
-            let modified = inputs
+            let mut operands: Vec<_> = operands
+                .children()
+                .filter(|n| n.has_tag_name("Operand"))
+                .collect();
+            operands.sort_by_key(|o| {
+                o.attribute("Order")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(usize::MAX)
+            });
+            if operands
                 .iter()
-                .any(|input| input[1].as_str() == Some(&format!("src{index}_modifiers")));
-            let Some(ty) = source_type(records, class, &data_types[index + 1], modified) else {
-                break;
-            };
-            operand_types.push(ty);
-        }
-        if operand_types.len() != arity {
-            continue;
-        }
-        let (private, support) = match arity {
-            1 => (ident("Unary"), ident("SupportedUnary")),
-            2 => (ident("Binary"), ident("SupportedBinary")),
-            _ => (ident("Ternary"), ident("SupportedTernary")),
-        };
-        let associated = if arity == 1 {
-            let source = &operand_types[0];
-            quote! { type Source = #source; }
-        } else {
-            let names = (0..arity).map(|i| ident(&format!("Source{i}")));
-            quote! { #(type #names = #operand_types;)* }
-        };
-        let tokens = quote! {
-            impl crate::private::#private<family::#family, #(crate::#data_types,)* crate::#encoding> for () {}
-            impl crate::#support<family::#family, #(crate::#data_types,)* crate::#encoding> for () { #associated }
-        };
-        let key = format!("{family_name}:{data_types:?}:{encoding}");
-        if let Some(old) = forms.get(&key) {
-            if old.to_string() != tokens.to_string() {
-                return Err(format!("conflicting operand schemas for {key}").into());
+                .any(|o| o.attribute("IsImplicit") != Some("false"))
+            {
+                continue;
             }
-        } else {
-            forms.insert(key, tokens);
+            if operands.len() < 2 || operands.len() > 4 {
+                continue;
+            }
+            let output = operands[0];
+            let sources = &operands[1..];
+            if output.attribute("Output") != Some("true")
+                || output.attribute("Input") != Some("false")
+                || sources.iter().any(|o| {
+                    o.attribute("Input") != Some("true") || o.attribute("Output") != Some("false")
+                })
+            {
+                continue;
+            }
+            if sources.iter().enumerate().any(|(i, o)| {
+                !matches!(text(*o, "FieldName"), "SRC0" | "SRC1" | "SRC2" | "VSRC1")
+                    || (text(*o, "FieldName") != format!("SRC{i}")
+                        && !(i == 1 && text(*o, "FieldName") == "VSRC1"))
+            }) {
+                continue;
+            }
+            let data: Option<Vec<_>> = sources.iter().map(|o| operand_type(*o, bit_type)).collect();
+            let Some(source_data) = data else {
+                continue;
+            };
+            if parts.starts_with(&["v", "cmp"]) && parts.len() == 4 {
+                if sources.len() != 2 || source_data[0] != source_data[1] {
+                    continue;
+                }
+                let expected = if e64 { "OPR_SREG" } else { "OPR_VCC" };
+                if text(output, "OperandType") != expected
+                    || text(output, "DataFormatName") != "FMT_NUM_M64"
+                {
+                    continue;
+                }
+                if !matches!(text(sources[0], "OperandType"), "OPR_SRC" | "OPR_SRC_NOLDS")
+                    || text(sources[1], "OperandType")
+                        != if e64 { "OPR_SRC_NOLDS" } else { "OPR_VGPR" }
+                {
+                    continue;
+                }
+                let predicate = match parts[2] {
+                    "f" => "Never",
+                    "t" => "Always",
+                    "eq" => "Eq",
+                    "ne" => "Ne",
+                    "lt" => "Lt",
+                    "le" => "Le",
+                    "gt" => "Gt",
+                    "ge" => "Ge",
+                    "lg" => "Lg",
+                    "o" => "Ordered",
+                    "u" => "Unordered",
+                    "nlt" => "NotLt",
+                    "nle" => "NotLe",
+                    "ngt" => "NotGt",
+                    "nge" => "NotGe",
+                    "nlg" => "NotLg",
+                    _ => continue,
+                };
+                let ty = &source_data[0];
+                predicates.insert(predicate.to_owned());
+                comparisons.insert((
+                    predicate.to_owned(),
+                    ty.to_string(),
+                    encoding_name.to_owned(),
+                ));
+                let p = ident(predicate);
+                let instruction =
+                    quote! { crate::VCmp<predicate::#p, crate::#ty, crate::#encoding> };
+                let expression = quote! {
+                    let fields = crate::decode::fields(text, 3)?;
+                    <#instruction>::new(crate::decode::operand(&fields[0])?, crate::decode::operand(&fields[1])?, crate::decode::operand(&fields[2])?)
+                };
+                let variant = rust_name(&mnemonic);
+                descriptions.insert(variant.clone(), description.clone());
+                decoders.insert(variant, (mnemonic, instruction, expression, !e64));
+                continue;
+            }
+            if text(output, "OperandType") != "OPR_VGPR" || text(output, "FieldName") != "VDST" {
+                continue;
+            }
+            let Some(destination) = operand_type(output, bit_type) else {
+                continue;
+            };
+            let mut data_types = vec![destination];
+            data_types.extend(source_data);
+            let operand_types: Option<Vec<_>> = sources
+                .iter()
+                .zip(&data_types[1..])
+                .map(|(o, t)| source_type(*o, t, e64))
+                .collect();
+            let Some(operand_types) = operand_types else {
+                continue;
+            };
+            let family_name = rust_name(&parts[..split].join("_"));
+            let family = ident(&family_name);
+            let arity = sources.len();
+            let homogeneous = data_types.iter().all(|t| *t == data_types[0]);
+            let entry = families
+                .entry(family_name.clone())
+                .or_insert((arity, homogeneous));
+            if entry.0 != arity {
+                return Err(format!("conflicting arities for {family_name}").into());
+            }
+            entry.1 &= homogeneous;
+            family_docs
+                .entry(family_name.clone())
+                .or_default()
+                .insert(operation.clone(), description.clone());
+            let (private, support, container) = match arity {
+                1 => (
+                    ident("Unary"),
+                    ident("SupportedUnary"),
+                    ident("VectorUnary"),
+                ),
+                2 => (
+                    ident("Binary"),
+                    ident("SupportedBinary"),
+                    ident("VectorBinary"),
+                ),
+                _ => (
+                    ident("Ternary"),
+                    ident("SupportedTernary"),
+                    ident("VectorTernary"),
+                ),
+            };
+            let associated = if arity == 1 {
+                let source = &operand_types[0];
+                quote! { type Source = #source; }
+            } else {
+                let names = (0..arity).map(|i| ident(&format!("Source{i}")));
+                quote! { #(type #names = #operand_types;)* }
+            };
+            let tokens = quote! {
+                impl crate::private::#private<family::#family, #(crate::#data_types,)* crate::#encoding> for () {}
+                impl crate::#support<family::#family, #(crate::#data_types,)* crate::#encoding> for () { #associated }
+            };
+            let key = format!("{family_name}:{data_types:?}:{encoding}");
+            if let Some(old) = forms.insert(key.clone(), tokens.clone()) {
+                if old.to_string() != tokens.to_string() {
+                    return Err(format!("conflicting operand schemas for {key}").into());
+                }
+            }
+            let instruction = quote! { crate::#container<family::#family, #(crate::#data_types,)* crate::#encoding> };
+            let indexes = 0..=arity;
+            let count = arity + 1;
+            let expression = quote! {
+                let fields = crate::decode::fields(text, #count)?;
+                <#instruction>::new(#(crate::decode::operand(&fields[#indexes])?,)*)
+            };
+            let variant = rust_name(&mnemonic);
+            descriptions.insert(variant.clone(), description.clone());
+            decoders.insert(variant, (mnemonic, instruction, expression, !e64));
         }
-        let container = ident(match arity {
-            1 => "VectorUnary",
-            2 => "VectorBinary",
-            _ => "VectorTernary",
-        });
-        let instruction =
-            quote! { crate::#container<family::#family, #(crate::#data_types,)* crate::#encoding> };
-        let indexes = 0..=arity;
-        let count = arity + 1;
-        let expression = quote! {
-            let fields = crate::decode::fields(text, #count)?;
-            <#instruction>::new(#(crate::decode::operand(&fields[#indexes])?,)*)
-        };
-        decoders.insert(
-            rust_name(mnemonic),
-            (
-                mnemonic.to_owned(),
-                instruction,
-                expression,
-                encoding == "E32",
-            ),
-        );
     }
     if comparisons.is_empty() || forms.is_empty() {
-        return Err("no supported TableGen profiles found".into());
+        return Err("no supported RDNA 2 instruction forms found".into());
     }
     let temporary = root.join("src/generated.tmp.rs");
     let mut output = BufWriter::new(File::create(&temporary)?);
+    write_doc(&mut output, "AMD ISA specification release date.")?;
     writeln!(
         output,
         "{}",
-        quote! { pub const LLVM_REVISION: &str = #revision; }
+        quote! { pub const ISA_RELEASE_DATE: &str = #release; }
+    )?;
+    write_doc(&mut output, "AMD ISA XML schema version.")?;
+    writeln!(
+        output,
+        "{}",
+        quote! { pub const ISA_SCHEMA_VERSION: &str = #schema; }
+    )?;
+    write_doc(
+        &mut output,
+        "Architecture described by the generated instruction types.",
+    )?;
+    writeln!(
+        output,
+        "{}",
+        quote! { pub const ISA_ARCHITECTURE: &str = "AMD RDNA 2"; }
     )?;
     writeln!(output, "pub mod predicate {{")?;
     for name in &predicates {
@@ -455,6 +384,7 @@ fn generate(
     }
     writeln!(output, "pub mod family {{")?;
     for name in families.keys() {
+        write_doc(&mut output, &family_doc(&family_docs[name]))?;
         let name = ident(name);
         writeln!(
             output,
@@ -464,6 +394,7 @@ fn generate(
     }
     writeln!(output, "}}")?;
     for (name, (arity, homogeneous)) in &families {
+        write_doc(&mut output, &family_doc(&family_docs[name]))?;
         let name = ident(name);
         let container = ident(match arity {
             1 => "VectorUnary",
@@ -496,6 +427,7 @@ fn generate(
         "#[derive(Debug, Clone, Copy, PartialEq)] pub enum DecodedInstruction {{"
     )?;
     for (variant, (_, ty, _, _)) in &decoders {
+        write_doc(&mut output, &descriptions[variant])?;
         let variant = ident(variant);
         writeln!(output, "{}", quote! { #variant(#ty), })?;
     }
@@ -532,6 +464,13 @@ fn generate(
         quote! { pub const KNOWN_MNEMONICS: &[&str] = &[#(#inventory,)*]; }
     )?;
     output.flush()?;
+    let status = std::process::Command::new("rustfmt")
+        .args(["--edition", "2024"])
+        .arg(&temporary)
+        .status()?;
+    if !status.success() {
+        return Err("rustfmt failed".into());
+    }
     fs::rename(temporary, root.join("src/generated.rs"))?;
     eprintln!(
         "generated {} comparison forms, {} vector families, {} vector forms, {} known mnemonics",
@@ -540,5 +479,24 @@ fn generate(
         forms.len(),
         inventory.len()
     );
+    Ok(())
+}
+
+fn family_doc(descriptions: &BTreeMap<String, String>) -> String {
+    descriptions
+        .iter()
+        .map(|(name, doc)| format!("`{name}`: {doc}"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn write_doc(output: &mut impl Write, documentation: &str) -> std::io::Result<()> {
+    for line in documentation.lines() {
+        if line.is_empty() {
+            writeln!(output, "///")?;
+        } else {
+            writeln!(output, "/// {line}")?;
+        }
+    }
     Ok(())
 }

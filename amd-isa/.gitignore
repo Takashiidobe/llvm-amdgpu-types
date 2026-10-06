@@ -1,0 +1,2 @@
+*.xml
+!amdgpu_isa_rdna2.xml

@@ -1,12 +1,11 @@
 [package]
 name = "llvm-amdgpu-types"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.89"
-license = "Apache-2.0 WITH LLVM-exception"
-description = "Typed AMDGPU instruction families generated from LLVM TableGen"
+license = "MIT OR Apache-2.0"
+description = "Typed RDNA 2 instructions generated from AMD ISA XML"
 repository = "https://github.com/takashiidobe/llvm-amdgpu-types"
-readme = "README.md"
 keywords = ["amdgpu", "llvm", "assembly", "gpu"]
 categories = ["development-tools", "parser-implementations"]
 include = [
@@ -15,7 +14,9 @@ include = [
   "Cargo.toml",
   "Cargo.lock",
   "README.md",
-  "LICENSE.txt",
+  "LICENSE-APACHE",
+  "LICENSE-MIT",
+  "amd-isa/LICENSE.txt",
 ]
 
 [lib]

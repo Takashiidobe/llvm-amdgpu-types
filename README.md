@@ -1,8 +1,7 @@
 # llvm-amdgpu-types
 
-Rust types for AMDGPU instructions and operands, generated from LLVM w/
-Tablegen.
-Currently targets GFX10, RDNA 2.
+Rust types for AMDGPU instructions and operands, generated from AMD’s
+machine-readable ISA XML. Currently targets RDNA 2.
 
 ## Types
 
@@ -40,7 +39,7 @@ let instruction = VFloor::<F32, E32>::new(
 );
 ```
 
-Other families include `VAdd`, `VCvt`, and `VCmp`. Their types restrict which
+Other families include `VAdd`, `VAddNc`, `VCvt`, and `VCmp`. Their types restrict which
 operands and encodings you can use.
 
 To decode assembly, use `parse` and match on `DecodedInstruction`:
@@ -69,15 +68,31 @@ cargo run --example decode -- 'v_floor_f32_e32 v0, v1'
 
 ## Generate
 
-To regenerate the types from an LLVM checkout:
+To regenerate the types from the checked-in RDNA 2 specification:
 
 ```sh
-cargo run --release --manifest-path tools/generate/Cargo.toml -- ~/llvm-project
+cargo run --release --manifest-path tools/generate/Cargo.toml
 ```
 
-This runs `llvm-tblgen` and writes `src/generated.rs`. Set to use a
-specific executable, or pass an existing TableGen JSON export as a second
-argument. Normal builds use the checked-in generated source.
+To use another copy of the RDNA 2 XML, pass its path as the only argument.
+The generator parses XML with `roxmltree`, writes `src/generated.rs`, and formats
+it with `rustfmt`. It requires no LLVM checkout or `llvm-tblgen`. Normal builds
+use the checked-in generated Rust source and need no XML parser dependency.
 
-Generated material derives from LLVM and is licensed under Apache-2.0 with LLVM
-exceptions. See [LICENSE.txt](LICENSE.txt).
+The source specification is `amd-isa/amdgpu_isa_rdna2.xml`, downloaded from
+[AMD GPUOpen](https://gpuopen.com/machine-readable-isa/). Its release date and
+schema version are available as `ISA_RELEASE_DATE` and `ISA_SCHEMA_VERSION`.
+Instruction descriptions become documentation on generated families and decoder
+variants. `KNOWN_MNEMONICS` lists all RDNA 2 instruction names; typed forms cover
+ordinary E32/E64 vector ALU instructions and comparisons with supported operands.
+Packed formats, extra destinations, memory operations, DPP, and SDWA need further
+modeling before they can be decoded.
+
+Assembly names follow AMD’s specification. For example, unsigned addition
+without carry is `v_add_nc_u32` (`VAddNc<U32, E32>`), rather than LLVM’s internal
+`V_ADD_U32` pseudo name. E32/E64 suffixes select the instruction encoding; an
+unsuffixed name selects E32 when that form has a generated decoder.
+
+The crate is licensed under either [MIT](LICENSE-MIT) or
+[Apache-2.0](LICENSE-APACHE), at your option. The AMD XML and descriptions derived from it are
+MIT-licensed; see [amd-isa/LICENSE.txt](amd-isa/LICENSE.txt).
