@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
+/// The data interpretation, storage type, and width of an operand.
 pub trait OperandType: crate::private::Sealed + Copy + Debug + PartialEq {
     type Value: Copy + Debug + PartialEq;
     const BITS: u16;
@@ -8,8 +9,9 @@ pub trait OperandType: crate::private::Sealed + Copy + Debug + PartialEq {
 }
 
 macro_rules! operand_types {
-    ($($name:ident: $value:ty = $bits:literal),* $(,)?) => {
+    ($( $(#[$meta:meta])* $name:ident: $value:ty = $bits:literal),* $(,)?) => {
         $(
+            $(#[$meta])*
             #[derive(Debug, Clone, Copy, PartialEq, Eq)]
             pub struct $name;
             impl crate::private::Sealed for $name {}
@@ -23,17 +25,49 @@ macro_rules! operand_types {
 }
 
 operand_types! {
-    U8: u8 = 8, U16: u16 = 16, U32: u32 = 32, U64: u64 = 64,
-    I8: i8 = 8, I16: i16 = 16, I32: i32 = 32, I64: i64 = 64,
-    F16: F16Bits = 16, F32: f32 = 32, F64: f64 = 64,
-    B16: u16 = 16, B32: u32 = 32, B64: u64 = 64,
-    B128: [u32; 4] = 128, B256: [u32; 8] = 256,
-    B512: [u32; 16] = 512, B1024: [u32; 32] = 1024,
+    /// 8-bit unsigned integer operand type.
+    U8: u8 = 8,
+    /// 16-bit unsigned integer operand type.
+    U16: u16 = 16,
+    /// 32-bit unsigned integer operand type.
+    U32: u32 = 32,
+    /// 64-bit unsigned integer operand type.
+    U64: u64 = 64,
+    /// 8-bit signed integer operand type.
+    I8: i8 = 8,
+    /// 16-bit signed integer operand type.
+    I16: i16 = 16,
+    /// 32-bit signed integer operand type.
+    I32: i32 = 32,
+    /// 64-bit signed integer operand type.
+    I64: i64 = 64,
+    /// 16-bit floating-point value operand type.
+    F16: F16Bits = 16,
+    /// 32-bit floating-point value operand type.
+    F32: f32 = 32,
+    /// 64-bit floating-point value operand type.
+    F64: f64 = 64,
+    /// 16-bit bit pattern operand type.
+    B16: u16 = 16,
+    /// 32-bit bit pattern operand type.
+    B32: u32 = 32,
+    /// 64-bit bit pattern operand type.
+    B64: u64 = 64,
+    /// 128-bit bit pattern operand type.
+    B128: [u32; 4] = 128,
+    /// 256-bit bit pattern operand type.
+    B256: [u32; 8] = 256,
+    /// 512-bit bit pattern operand type.
+    B512: [u32; 16] = 512,
+    /// 1024-bit bit pattern operand type.
+    B1024: [u32; 32] = 1024,
 }
 
+/// The raw bits of a 16-bit floating-point immediate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct F16Bits(pub u16);
 
+/// An immediate value interpreted as operand type `T`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Immediate<T: OperandType>(T::Value);
 
@@ -47,6 +81,7 @@ impl<T: OperandType> Immediate<T> {
     }
 }
 
+/// A vector register or consecutive register group interpreted as `T`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VectorRegister<T: OperandType> {
     index: u16,
@@ -67,6 +102,7 @@ impl<T: OperandType> VectorRegister<T> {
     }
 }
 
+/// An aligned scalar register or consecutive register group interpreted as `T`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScalarRegister<T: OperandType> {
     index: u16,
@@ -87,6 +123,7 @@ impl<T: OperandType> ScalarRegister<T> {
     }
 }
 
+/// Names of the special registers supported by this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpecialRegisterName {
     VccLo,
@@ -99,6 +136,7 @@ pub enum SpecialRegisterName {
     Scc,
 }
 
+/// A special register interpreted as operand type `T`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpecialRegister<T: OperandType> {
     name: SpecialRegisterName,
@@ -122,6 +160,7 @@ impl<T: OperandType> SpecialRegister<T> {
     }
 }
 
+/// A vector, scalar, or special register, or an immediate source value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SourceOperand<T: OperandType> {
     VectorRegister(VectorRegister<T>),
@@ -130,12 +169,15 @@ pub enum SourceOperand<T: OperandType> {
     Immediate(Immediate<T>),
 }
 
+/// The lane mask type associated with a wave size.
 pub trait WaveSize: crate::private::Sealed + Copy + Debug + PartialEq {
     type Mask: OperandType;
 }
 
+/// A wave of 32 lanes, with a 32-bit lane mask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wave32;
+/// A wave of 64 lanes, with a 64-bit lane mask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wave64;
 impl crate::private::Sealed for Wave32 {}
@@ -147,6 +189,7 @@ impl WaveSize for Wave64 {
     type Mask = U64;
 }
 
+/// The vector condition-code register for wave size `W`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vcc<W: WaveSize>(PhantomData<W>);
 
@@ -156,17 +199,20 @@ impl<W: WaveSize> Default for Vcc<W> {
     }
 }
 
+/// VCC or a scalar register used as a lane mask destination.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ScalarDestination<W: WaveSize> {
     Vcc(Vcc<W>),
     Register(ScalarRegister<W::Mask>),
 }
 
+/// A floating-point operand type supporting negate and absolute modifiers.
 pub trait FloatType: OperandType {}
 impl FloatType for F16 {}
 impl FloatType for F32 {}
 impl FloatType for F64 {}
 
+/// A source operand with optional floating-point negate and absolute modifiers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModifiedSource<T: OperandType> {
     source: SourceOperand<T>,
@@ -217,6 +263,7 @@ impl<T: FloatType> ModifiedSource<T> {
     }
 }
 
+/// A scalar register, special register, or immediate source value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ScalarSourceOperand<T: OperandType> {
     Register(ScalarRegister<T>),

@@ -2,6 +2,7 @@ use std::ops::Range;
 
 use crate::*;
 
+/// An assembly decoding error with a reason and byte range in the input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeError {
     pub range: Range<usize>,

@@ -5,13 +5,16 @@ use crate::{
     ModifiedSource, OperandType, ScalarDestination, SourceOperand, Vcc, VectorRegister, WaveSize,
 };
 
+/// 32-bit instruction encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct E32;
+/// 64-bit instruction encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct E64;
 impl crate::private::Sealed for E32 {}
 impl crate::private::Sealed for E64 {}
 
+/// Operand types for a comparison encoding and wave size.
 pub trait CompareEncoding<T: OperandType, W: WaveSize>:
     crate::private::Sealed + Copy + Debug + PartialEq
 {
@@ -32,8 +35,40 @@ impl<T: OperandType, W: WaveSize> CompareEncoding<T, W> for E64 {
     type Source1 = ModifiedSource<T>;
 }
 
+/// A supported combination of comparison predicate, input type, and encoding.
 pub trait SupportedCompare<P, T, E>: crate::private::Compare<P, T, E> {}
 
+/// Compares two inputs per lane and produces a lane mask.
+///
+/// `P` selects the predicate, `T` selects the input data type, and `E` selects
+/// the encoding. `W` selects the mask width and defaults to [`crate::Wave32`].
+///
+/// With [`E32`], the destination is [`Vcc<W>`], the first source is
+/// [`SourceOperand<T>`], and the second source is [`VectorRegister<T>`].
+/// With [`E64`], the destination is [`ScalarDestination<W>`] and both sources
+/// are [`ModifiedSource<T>`]. The text decoder currently uses wave32.
+/// Supported predicates, input types, and encodings are enforced by
+/// [`SupportedCompare`].
+///
+/// Assembly:
+///
+/// ```text
+/// v_cmp_eq_u32_e32 vcc_lo, 42, v1
+/// ```
+///
+/// Rust:
+///
+/// ```rust
+/// use llvm_amdgpu_types::*;
+///
+/// let instruction = VCmp::<predicate::Eq, U32, E32>::new(
+///     Vcc::default(),
+///     SourceOperand::Immediate(Immediate::new(42)),
+///     VectorRegister::new(1).unwrap(),
+/// );
+/// let decoded = parse("v_cmp_eq_u32_e32 vcc_lo, 42, v1").unwrap();
+/// assert_eq!(decoded, DecodedInstruction::VCmpEqU32E32(instruction));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VCmp<P, T, E, W = crate::Wave32>
 where
@@ -75,19 +110,23 @@ where
     }
 }
 
+/// An instruction encoding supported by the typed vector instructions.
 pub trait Encoding: crate::private::Sealed + Copy + Debug + PartialEq {}
 impl Encoding for E32 {}
 impl Encoding for E64 {}
 
+/// Source operand type for a supported unary instruction form.
 pub trait SupportedUnary<F, D, S, E>: crate::private::Unary<F, D, S, E> {
     type Source: Copy + Debug + PartialEq;
 }
 
+/// Source operand types for a supported binary instruction form.
 pub trait SupportedBinary<F, D, S0, S1, E>: crate::private::Binary<F, D, S0, S1, E> {
     type Source0: Copy + Debug + PartialEq;
     type Source1: Copy + Debug + PartialEq;
 }
 
+/// Source operand types for a supported ternary instruction form.
 pub trait SupportedTernary<F, D, S0, S1, S2, E>:
     crate::private::Ternary<F, D, S0, S1, S2, E>
 {
@@ -96,6 +135,7 @@ pub trait SupportedTernary<F, D, S0, S1, S2, E>:
     type Source2: Copy + Debug + PartialEq;
 }
 
+/// A vector instruction with one source and a vector register destination.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VectorUnary<F, D, S, E>
 where
@@ -134,6 +174,7 @@ where
     }
 }
 
+/// A vector instruction with two sources and a vector register destination.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VectorBinary<F, D, S0, S1, E>
 where
@@ -180,6 +221,7 @@ where
     }
 }
 
+/// A vector instruction with three sources and a vector register destination.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VectorTernary<F, D, S0, S1, S2, E>
 where

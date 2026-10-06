@@ -82,11 +82,6 @@ use the checked-in generated Rust source and need no XML parser dependency.
 The source specification is `amd-isa/amdgpu_isa_rdna2.xml`, downloaded from
 [AMD GPUOpen](https://gpuopen.com/machine-readable-isa/). Its release date and
 schema version are available as `ISA_RELEASE_DATE` and `ISA_SCHEMA_VERSION`.
-Instruction descriptions become documentation on generated families and decoder
-variants. `KNOWN_MNEMONICS` lists all RDNA 2 instruction names; typed forms cover
-ordinary E32/E64 vector ALU instructions and comparisons with supported operands.
-Packed formats, extra destinations, memory operations, DPP, and SDWA need further
-modeling before they can be decoded.
 
 Assembly names follow AMD’s specification. For example, unsigned addition
 without carry is `v_add_nc_u32` (`VAddNc<U32, E32>`), rather than LLVM’s internal
